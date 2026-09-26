@@ -1,0 +1,101 @@
+<Window x:Class="TronAutoSweeper.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="TRON Auto Sweeper"
+        Width="820" Height="700"
+        MinWidth="760" MinHeight="620"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="TRON AUTO SWEEPER"
+                       FontSize="24" FontWeight="Bold"/>
+            <TextBlock Text="Автоматический перевод входящих TRX"
+                       Margin="0,3,0,15" Opacity="0.7"/>
+        </StackPanel>
+
+        <Grid Grid.Row="1" Margin="0,0,0,12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="210"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Text="Приватный ключ:" VerticalAlignment="Center" Margin="0,6"/>
+            <PasswordBox Grid.Row="0" Grid.Column="1" x:Name="PrivateKeyBox" Margin="0,4"/>
+
+            <TextBlock Grid.Row="1" Text="Адрес получателя:" VerticalAlignment="Center" Margin="0,6"/>
+            <TextBox Grid.Row="1" Grid.Column="1" x:Name="ReceiverBox" Margin="0,4"/>
+
+            <TextBlock Grid.Row="2" Text="Минимальное пополнение:" VerticalAlignment="Center" Margin="0,6"/>
+            <TextBox Grid.Row="2" Grid.Column="1" x:Name="MinDepositBox" Text="1" Margin="0,4"/>
+
+            <TextBlock Grid.Row="3" Text="Резерв TRX:" VerticalAlignment="Center" Margin="0,6"/>
+            <TextBox Grid.Row="3" Grid.Column="1" x:Name="ReserveBox" Text="1" Margin="0,4"/>
+
+            <TextBlock Grid.Row="4" Text="TronGrid API key:" VerticalAlignment="Center" Margin="0,6"/>
+            <PasswordBox Grid.Row="4" Grid.Column="1" x:Name="ApiKeyBox" Margin="0,4"/>
+        </Grid>
+
+        <GroupBox Grid.Row="2" Header="Состояние" Margin="0,0,0,12">
+            <Grid Margin="10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="180"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0" Text="Мониторимый адрес:"/>
+                <TextBlock Grid.Row="0" Grid.Column="1" x:Name="AddressText" Text="—" TextWrapping="Wrap"/>
+
+                <TextBlock Grid.Row="1" Text="Баланс:" Margin="0,7,0,0"/>
+                <TextBlock Grid.Row="1" Grid.Column="1" x:Name="BalanceText" Text="—" Margin="0,7,0,0"/>
+
+                <TextBlock Grid.Row="2" Text="Статус:" Margin="0,7,0,0"/>
+                <TextBlock Grid.Row="2" Grid.Column="1" x:Name="StatusText" Text="Остановлен" Margin="0,7,0,0"/>
+
+                <TextBlock Grid.Row="3" Text="Последняя TX:" Margin="0,7,0,0"/>
+                <TextBlock Grid.Row="3" Grid.Column="1" x:Name="TxText" Text="—" Margin="0,7,0,0" TextWrapping="Wrap"/>
+            </Grid>
+        </GroupBox>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,0,0,12">
+            <Button x:Name="SaveButton" Content="Сохранить" Width="130" Margin="0,0,8,0" Click="Save_Click"/>
+            <Button x:Name="StartButton" Content="▶ Запустить" Width="130" Margin="0,0,8,0" Click="Start_Click"/>
+            <Button x:Name="StopButton" Content="■ Остановить" Width="130" Click="Stop_Click"/>
+        </StackPanel>
+
+        <GroupBox Grid.Row="4" Header="Журнал">
+            <TextBox x:Name="LogBox"
+                     IsReadOnly="True"
+                     VerticalScrollBarVisibility="Auto"
+                     HorizontalScrollBarVisibility="Auto"
+                     TextWrapping="NoWrap"
+                     FontFamily="Consolas"/>
+        </GroupBox>
+
+        <TextBlock Grid.Row="5"
+                   Text="Приватный ключ хранится локально с помощью Windows DPAPI. Не передавайте его никому."
+                   Foreground="DarkRed"
+                   Margin="0,10,0,0"/>
+    </Grid>
+</Window>
