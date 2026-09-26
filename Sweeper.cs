@@ -1,3 +1,4 @@
+using System.IO;
 using System.Net.Http;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
@@ -57,7 +58,7 @@ public sealed class Sweeper
         if (!TronAddress.IsValidBase58(_sourceAddress))
             throw new InvalidOperationException("Не удалось получить корректный TRON-адрес из приватного ключа.");
 
-        _sourceHexAddress = TronAddress.ToHexAddress(_sourceAddress);
+        _sourceHexAddress = Base58ToHexAddress(_sourceAddress);
 
         if (!TronAddress.IsValidBase58(_receiver))
             throw new InvalidOperationException("Адрес получателя неверен.");
@@ -181,8 +182,13 @@ public sealed class Sweeper
             var id = idEl.GetString() ?? "";
             if (string.IsNullOrWhiteSpace(id)) continue;
 
-            var ts = item.TryGetProperty("block_timestamp", out var tsEl) && tsEl.TryGetInt64(out var timestamp)
-                ? timestamp : 0;
+            long ts = 0;
+            if (item.TryGetProperty("block_timestamp", out var tsEl) &&
+                tsEl.ValueKind == JsonValueKind.Number &&
+                tsEl.TryGetInt64(out var parsedTimestamp))
+            {
+                ts = parsedTimestamp;
+            }
 
             if (!item.TryGetProperty("raw_data", out var raw) ||
                 !raw.TryGetProperty("contract", out var contracts) ||
@@ -210,7 +216,7 @@ public sealed class Sweeper
                                && !string.Equals(owner, _sourceHexAddress, StringComparison.OrdinalIgnoreCase);
 
                 if (incoming)
-                    list.Add(new Tx(id, timestamp, true, amount));
+                    list.Add(new Tx(id, ts, true, amount));
             }
         }
 
@@ -257,6 +263,55 @@ public sealed class Sweeper
         var item = data[0];
         var sun = item.TryGetProperty("balance", out var bal) && bal.TryGetInt64(out var value) ? value : 0;
         return sun / 1_000_000m;
+    }
+
+    private static string Base58ToHexAddress(string address)
+    {
+        const string alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+        if (string.IsNullOrWhiteSpace(address))
+            throw new FormatException("Пустой TRON-адрес.");
+
+        var bytes = new List<byte> { 0 };
+        foreach (var c in address)
+        {
+            var carry = alphabet.IndexOf(c);
+            if (carry < 0)
+                throw new FormatException("Некорректный Base58-адрес TRON.");
+
+            for (var i = 0; i < bytes.Count; i++)
+            {
+                var value = bytes[i] * 58 + carry;
+                bytes[i] = (byte)(value & 0xff);
+                carry = value >> 8;
+            }
+
+            while (carry > 0)
+            {
+                bytes.Add((byte)(carry & 0xff));
+                carry >>= 8;
+            }
+        }
+
+        var leadingZeros = address.TakeWhile(c => c == '1').Count();
+        bytes.Reverse();
+
+        var decoded = Enumerable.Repeat((byte)0, leadingZeros)
+            .Concat(bytes.SkipWhile((b, i) => i == 0 && b == 0))
+            .ToArray();
+
+        if (decoded.Length != 25 || decoded[0] != 0x41)
+            throw new FormatException("Некорректный размер TRON-адреса.");
+
+        var payload = decoded[..21];
+        var checksum = decoded[21..];
+        var hash = System.Security.Cryptography.SHA256.HashData(
+            System.Security.Cryptography.SHA256.HashData(payload));
+
+        if (!checksum.SequenceEqual(hash[..4]))
+            throw new FormatException("Неверная контрольная сумма TRON-адреса.");
+
+        return Convert.ToHexString(payload).ToLowerInvariant();
     }
 
     private void LoadState()
