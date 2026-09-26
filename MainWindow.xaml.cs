@@ -17,7 +17,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         _sweeper.Log += message => Dispatcher.Invoke(() => LogBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\n"));
-        _sweeper.StateChanged += state => Dispatcher.Invoke(() => StateText.Text = state);
+       _sweeper.StateChanged += state => Dispatcher.Invoke(() => StatusText.Text = state);
         LoadConfig();
     }
 
@@ -33,7 +33,7 @@ public partial class MainWindow : Window
             ReceiverBox.Text = cfg.Receiver;
             MinDepositBox.Text = cfg.MinDeposit.ToString("0.######");
             ReserveBox.Text = cfg.Reserve.ToString("0.######");
-            ApiKeyBox.Text = cfg.ApiKey;
+            ApiKeyBox.Password = cfg.ApiKey;
         }
         catch (Exception ex) { LogBox.AppendText($"Ошибка загрузки настроек: {ex.Message}\n"); }
     }
@@ -42,7 +42,7 @@ public partial class MainWindow : Window
     {
         privateKey = PrivateKeyBox.Password.Trim();
         receiver = ReceiverBox.Text.Trim();
-        apiKey = ApiKeyBox.Text.Trim();
+        apiKey = ApiKeyBox.Password.Trim();
         minDeposit = 0;
         reserve = 0;
 
@@ -82,7 +82,7 @@ public partial class MainWindow : Window
 
     private bool ReadInputsFromStored(out string receiver, out decimal minDeposit, out decimal reserve, out string apiKey)
     {
-        receiver = ReceiverBox.Text.Trim(); apiKey = ApiKeyBox.Text.Trim(); minDeposit = reserve = 0;
+        receiver = ReceiverBox.Text.Trim(); apiKey = ApiKeyBox.Password.Trim(); minDeposit = reserve = 0;
         if (!TronAddress.IsValidBase58(receiver)) { MessageBox.Show("Адрес получателя TRON указан неверно."); return false; }
         if (!decimal.TryParse(MinDepositBox.Text.Replace(',', '.'), System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out minDeposit) || minDeposit < 0) { MessageBox.Show("Неверный минимальный депозит."); return false; }
         if (!decimal.TryParse(ReserveBox.Text.Replace(',', '.'), System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out reserve) || reserve < 0) { MessageBox.Show("Неверный резерв TRX."); return false; }
