@@ -1,5 +1,4 @@
 using System.Net.Http;
-using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -10,30 +9,35 @@ namespace TronAutoSweeper;
 public sealed class Sweeper
 {
     private readonly HttpClient _http = new() { BaseAddress = new Uri("https://api.trongrid.io") };
+    private readonly SemaphoreSlim _sweepLock = new(1, 1);
     private CancellationTokenSource? _cts;
     private ITransactionClient? _txClient;
     private TronNetOptions? _options;
     private string _privateKey = "";
     private string _sourceAddress = "";
+    private string _sourceHexAddress = "";
     private string _receiver = "";
     private decimal _minDeposit;
     private decimal _reserve;
     private string _apiKey = "";
-    private readonly HashSet<string> _seen = new();
-    private bool _baselineReady;
+    private string _statePath = "";
+    private readonly HashSet<string> _seen = new(StringComparer.OrdinalIgnoreCase);
 
     public event Action<string>? Log;
     public event Action<string>? StateChanged;
 
-    public async Task ConfigureAsync(string privateKey, string receiver, decimal minDeposit, decimal reserve, string apiKey)
+    public Task ConfigureAsync(string privateKey, string receiver, decimal minDeposit, decimal reserve, string apiKey, string stateDirectory)
     {
         _privateKey = privateKey;
         _receiver = receiver;
         _minDeposit = minDeposit;
         _reserve = reserve;
         _apiKey = apiKey;
+        _statePath = Path.Combine(stateDirectory, "processed-txids.json");
+
         _http.DefaultRequestHeaders.Remove("TRON-PRO-API-KEY");
-        if (!string.IsNullOrWhiteSpace(_apiKey)) _http.DefaultRequestHeaders.Add("TRON-PRO-API-KEY", _apiKey);
+        if (!string.IsNullOrWhiteSpace(_apiKey))
+            _http.DefaultRequestHeaders.TryAddWithoutValidation("TRON-PRO-API-KEY", _apiKey);
 
         var services = new ServiceCollection();
         services.AddTronNet(x =>
@@ -50,17 +54,30 @@ public sealed class Sweeper
 
         var key = new TronECKey(_privateKey, _options.Network);
         _sourceAddress = key.GetPublicAddress();
-        if (!TronAddress.IsValidBase58(_sourceAddress)) throw new InvalidOperationException("Не удалось получить корректный TRON-адрес из приватного ключа.");
+        if (!TronAddress.IsValidBase58(_sourceAddress))
+            throw new InvalidOperationException("Не удалось получить корректный TRON-адрес из приватного ключа.");
+
+        _sourceHexAddress = TronAddress.ToHexAddress(_sourceAddress);
+
+        if (!TronAddress.IsValidBase58(_receiver))
+            throw new InvalidOperationException("Адрес получателя неверен.");
+        if (string.Equals(_sourceAddress, _receiver, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Адрес получателя не должен совпадать с исходным.");
+        if (_minDeposit < 0 || _reserve < 0)
+            throw new InvalidOperationException("Минимальный депозит и резерв не могут быть отрицательными.");
+
+        LoadState();
         Log?.Invoke($"Адрес из ключа: {_sourceAddress}");
-        if (!TronAddress.IsValidBase58(_receiver)) throw new InvalidOperationException("Адрес получателя неверен.");
-        if (_sourceAddress == _receiver) throw new InvalidOperationException("Адрес получателя не должен совпадать с исходным.");
+        Log?.Invoke($"HEX-адрес источника: {_sourceHexAddress}");
         Log?.Invoke("Приватный ключ локально проверен; ключ не отправляется в TronGrid.");
+        return Task.CompletedTask;
     }
 
     public async Task StartAsync()
     {
         if (_txClient is null) throw new InvalidOperationException("Сначала настройте программу.");
         if (_cts is not null) return;
+
         _cts = new CancellationTokenSource();
         StateChanged?.Invoke("Запущено");
         Log?.Invoke("Мониторинг входящих TRX запущен.");
@@ -72,6 +89,7 @@ public sealed class Sweeper
     public void Stop()
     {
         _cts?.Cancel();
+        _cts?.Dispose();
         _cts = null;
         StateChanged?.Invoke("Остановлено");
         Log?.Invoke("Мониторинг остановлен.");
@@ -79,9 +97,11 @@ public sealed class Sweeper
 
     private async Task EstablishBaselineAsync(CancellationToken ct)
     {
-        foreach (var tx in await GetTransactionsAsync(ct)) _seen.Add(tx.Id);
-        _baselineReady = true;
-        Log?.Invoke("Базовая история зафиксирована; старые депозиты повторно отправляться не будут.");
+        foreach (var tx in await GetTransactionsAsync(ct))
+            _seen.Add(tx.Id);
+
+        SaveState();
+        Log?.Invoke("Базовая история зафиксирована; уже существующие депозиты повторно отправляться не будут.");
     }
 
     private async Task LoopAsync(CancellationToken ct)
@@ -94,16 +114,51 @@ public sealed class Sweeper
                 foreach (var tx in txs.OrderBy(x => x.Timestamp))
                 {
                     if (_seen.Contains(tx.Id)) continue;
-                    _seen.Add(tx.Id);
-                    if (!tx.Incoming || tx.AmountSun <= 0) continue;
+
+                    if (!tx.Incoming || tx.AmountSun <= 0)
+                    {
+                        _seen.Add(tx.Id);
+                        SaveState();
+                        continue;
+                    }
+
                     Log?.Invoke($"Обнаружен входящий TRX: {tx.AmountSun / 1_000_000m:0.######} TRX, TX {tx.Id}");
-                    if (tx.AmountSun / 1_000_000m < _minDeposit) { Log?.Invoke("Сумма ниже минимального порога."); continue; }
-                    await SweepAsync(ct);
+
+                    if (tx.AmountSun / 1_000_000m < _minDeposit)
+                    {
+                        _seen.Add(tx.Id);
+                        SaveState();
+                        Log?.Invoke("Сумма ниже минимального порога.");
+                        continue;
+                    }
+
+                    await _sweepLock.WaitAsync(ct);
+                    try
+                    {
+                        // TXID добавляется в историю только после успешного broadcast.
+                        // При временной ошибке следующая итерация попробует снова.
+                        var sweepTxid = await SweepAsync(ct);
+                        if (!string.IsNullOrWhiteSpace(sweepTxid))
+                        {
+                            _seen.Add(tx.Id);
+                            SaveState();
+                        }
+                    }
+                    finally
+                    {
+                        _sweepLock.Release();
+                    }
                 }
+
                 await Task.Delay(TimeSpan.FromSeconds(5), ct);
             }
             catch (OperationCanceledException) { break; }
-            catch (Exception ex) { Log?.Invoke($"Ошибка мониторинга: {ex.Message}"); await Task.Delay(TimeSpan.FromSeconds(10), ct); }
+            catch (Exception ex)
+            {
+                Log?.Invoke($"Ошибка мониторинга: {ex.Message}");
+                try { await Task.Delay(TimeSpan.FromSeconds(10), ct); }
+                catch (OperationCanceledException) { break; }
+            }
         }
     }
 
@@ -116,46 +171,79 @@ public sealed class Sweeper
         response.EnsureSuccessStatusCode();
         using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
         var list = new List<Tx>();
-        if (!doc.RootElement.TryGetProperty("data", out var data)) return list;
+
+        if (!doc.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array)
+            return list;
+
         foreach (var item in data.EnumerateArray())
         {
             if (!item.TryGetProperty("txID", out var idEl)) continue;
             var id = idEl.GetString() ?? "";
-            var ts = item.TryGetProperty("block_timestamp", out var tsEl) ? tsEl.GetInt64() : 0;
-            var contracts = item.TryGetProperty("raw_data", out var raw) && raw.TryGetProperty("contract", out var c) ? c : default;
-            if (contracts.ValueKind != JsonValueKind.Array) continue;
+            if (string.IsNullOrWhiteSpace(id)) continue;
+
+            var ts = item.TryGetProperty("block_timestamp", out var tsEl) && tsEl.TryGetInt64(out var timestamp)
+                ? timestamp : 0;
+
+            if (!item.TryGetProperty("raw_data", out var raw) ||
+                !raw.TryGetProperty("contract", out var contracts) ||
+                contracts.ValueKind != JsonValueKind.Array)
+                continue;
+
             foreach (var contract in contracts.EnumerateArray())
             {
-                if (!contract.TryGetProperty("type", out var typeEl) || typeEl.GetString() != "TransferContract") continue;
-                if (!contract.TryGetProperty("parameter", out var param) || !param.TryGetProperty("value", out var value)) continue;
+                if (!contract.TryGetProperty("type", out var typeEl) ||
+                    typeEl.GetString() != "TransferContract") continue;
+
+                if (!contract.TryGetProperty("parameter", out var param) ||
+                    !param.TryGetProperty("value", out var value)) continue;
+
                 var owner = value.TryGetProperty("owner_address", out var ownerEl) ? ownerEl.GetString() : null;
                 var to = value.TryGetProperty("to_address", out var toEl) ? toEl.GetString() : null;
-                var amount = value.TryGetProperty("amount", out var amountEl) ? amountEl.GetInt64() : 0;
+                var amount = value.TryGetProperty("amount", out var amountEl) && amountEl.TryGetInt64(out var amountValue)
+                    ? amountValue : 0;
+
                 if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(to)) continue;
-                var incoming = string.Equals(to, _sourceAddress, StringComparison.OrdinalIgnoreCase);
-                if (incoming) list.Add(new Tx(id, ts, true, amount));
+
+                // TronGrid raw_data содержит TRON-адреса в hex-виде (41...).
+                // Сравниваем именно с HEX-адресом нашего кошелька.
+                var incoming = string.Equals(to, _sourceHexAddress, StringComparison.OrdinalIgnoreCase)
+                               && !string.Equals(owner, _sourceHexAddress, StringComparison.OrdinalIgnoreCase);
+
+                if (incoming)
+                    list.Add(new Tx(id, timestamp, true, amount));
             }
         }
+
         return list;
     }
 
-    private async Task SweepAsync(CancellationToken ct)
+    private async Task<string?> SweepAsync(CancellationToken ct)
     {
         var balance = await GetBalanceAsync(ct);
         var amount = balance - _reserve;
-        if (amount < _minDeposit) { Log?.Invoke($"Баланс {balance:0.######} TRX; после резерва недостаточно для sweep."); return; }
+        if (amount < _minDeposit)
+        {
+            Log?.Invoke($"Баланс {balance:0.######} TRX; после резерва недостаточно для sweep.");
+            return null;
+        }
+
         var sun = checked((long)Math.Floor(amount * 1_000_000m));
-        if (sun <= 0) return;
+        if (sun <= 0) return null;
 
         Log?.Invoke($"Создаю перевод {sun / 1_000_000m:0.######} TRX → {_receiver}");
         var ext = await _txClient!.CreateTransactionAsync(_sourceAddress, _receiver, sun);
-        if (ext is null || ext.Transaction is null || !ext.Result.Result) throw new InvalidOperationException("TRON не смог создать транзакцию.");
+        if (ext is null || ext.Transaction is null || !ext.Result.Result)
+            throw new InvalidOperationException("TRON не смог создать транзакцию.");
+
         var signed = _txClient.GetTransactionSign(ext.Transaction, _privateKey);
         var result = await _txClient.BroadcastTransactionAsync(signed);
-        if (!result.Result) throw new InvalidOperationException("TRON отклонил broadcast транзакции.");
+        if (!result.Result)
+            throw new InvalidOperationException("TRON отклонил broadcast транзакции.");
+
         var txid = signed.GetTxid();
         Log?.Invoke($"Транзакция отправлена. TXID: {txid}");
-        Log?.Invoke("Важно: broadcast ещё не означает solidified confirmation; программа не считает операцию окончательно подтверждённой до проверки цепочки.");
+        Log?.Invoke("Broadcast принят узлом. Это ещё не равно окончательному подтверждению в сети.");
+        return txid;
     }
 
     private async Task<decimal> GetBalanceAsync(CancellationToken ct)
@@ -163,9 +251,43 @@ public sealed class Sweeper
         using var response = await _http.GetAsync($"/v1/accounts/{Uri.EscapeDataString(_sourceAddress)}", ct);
         response.EnsureSuccessStatusCode();
         using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
-        if (!doc.RootElement.TryGetProperty("data", out var data) || data.GetArrayLength() == 0) return 0;
+        if (!doc.RootElement.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array || data.GetArrayLength() == 0)
+            return 0;
+
         var item = data[0];
-        var sun = item.TryGetProperty("balance", out var bal) ? bal.GetInt64() : 0;
+        var sun = item.TryGetProperty("balance", out var bal) && bal.TryGetInt64(out var value) ? value : 0;
         return sun / 1_000_000m;
+    }
+
+    private void LoadState()
+    {
+        try
+        {
+            if (!File.Exists(_statePath)) return;
+            var ids = JsonSerializer.Deserialize<List<string>>(File.ReadAllText(_statePath));
+            if (ids is null) return;
+            foreach (var id in ids.Where(x => !string.IsNullOrWhiteSpace(x)))
+                _seen.Add(id);
+        }
+        catch (Exception ex)
+        {
+            Log?.Invoke($"Не удалось загрузить историю TXID: {ex.Message}");
+        }
+    }
+
+    private void SaveState()
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(_statePath);
+            if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
+            var temp = _statePath + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(_seen.OrderBy(x => x).ToList()));
+            File.Move(temp, _statePath, true);
+        }
+        catch (Exception ex)
+        {
+            Log?.Invoke($"Не удалось сохранить историю TXID: {ex.Message}");
+        }
     }
 }
