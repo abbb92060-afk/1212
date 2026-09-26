@@ -1,6 +1,7 @@
 using System.IO;
 using System.Net.Http;
 using System.Text.Json;
+using NBitcoin;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using TronNet;
@@ -15,6 +16,7 @@ public sealed class Sweeper
     private ITransactionClient? _txClient;
     private TronNetOptions? _options;
     private string _privateKey = "";
+    private int _derivationIndex;
     private string _sourceAddress = "";
     private string _sourceHexAddress = "";
     private string _receiver = "";
@@ -26,10 +28,12 @@ public sealed class Sweeper
 
     public event Action<string>? Log;
     public event Action<string>? StateChanged;
+    public string SourceAddress => _sourceAddress;
 
-    public Task ConfigureAsync(string privateKey, string receiver, decimal minDeposit, decimal reserve, string apiKey, string stateDirectory)
+    public Task ConfigureAsync(string seedPhrase, string receiver, decimal minDeposit, decimal reserve, string apiKey, string stateDirectory, int derivationIndex = 0)
     {
-        _privateKey = privateKey;
+        _derivationIndex = derivationIndex;
+        _privateKey = DerivePrivateKeyFromSeed(seedPhrase, derivationIndex);
         _receiver = receiver;
         _minDeposit = minDeposit;
         _reserve = reserve;
@@ -68,9 +72,10 @@ public sealed class Sweeper
             throw new InvalidOperationException("Минимальный депозит и резерв не могут быть отрицательными.");
 
         LoadState();
-        Log?.Invoke($"Адрес из ключа: {_sourceAddress}");
+        Log?.Invoke($"Адрес из seed-фразы: {_sourceAddress}");
+        Log?.Invoke($"Derivation path: m/44'/195'/0'/0/{_derivationIndex}");
         Log?.Invoke($"HEX-адрес источника: {_sourceHexAddress}");
-        Log?.Invoke("Приватный ключ локально проверен; ключ не отправляется в TronGrid.");
+        Log?.Invoke("Seed-фраза обработана локально; секретный ключ не отправляется в TronGrid.");
         return Task.CompletedTask;
     }
 
@@ -221,6 +226,23 @@ public sealed class Sweeper
         }
 
         return list;
+    }
+
+    private static string DerivePrivateKeyFromSeed(string seedPhrase, int derivationIndex)
+    {
+        var normalized = string.Join(' ', seedPhrase.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        try
+        {
+            var mnemonic = new Mnemonic(normalized);
+            var path = new KeyPath($"m/44'/195'/0'/0/{derivationIndex}");
+            var extKey = mnemonic.DeriveExtKey();
+            var child = extKey.Derive(path);
+            return Convert.ToHexString(child.PrivateKey.ToBytes());
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException("Не удалось получить TRON-ключ из seed-фразы. Проверьте слова и derivation index.", ex);
+        }
     }
 
     private async Task<string?> SweepAsync(CancellationToken ct)
