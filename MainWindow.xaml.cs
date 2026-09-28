@@ -13,7 +13,7 @@ public partial class MainWindow : Window
     private readonly string _appDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "TRON-Auto-Sweeper");
-    private string SeedPath => Path.Combine(_appDir, "seedphrase.dat");
+    private string KeyPath => Path.Combine(_appDir, "privatekey.dat");
     private string ConfigPath => Path.Combine(_appDir, "config.json");
 
     public MainWindow()
@@ -22,10 +22,16 @@ public partial class MainWindow : Window
         _sweeper.Log += message => Dispatcher.Invoke(() =>
             LogBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\n"));
         _sweeper.StateChanged += state => Dispatcher.Invoke(() => StatusText.Text = state);
+        _sweeper.BalancesChanged += (trx, usdt) => Dispatcher.Invoke(() =>
+        {
+            BalanceText.Text = $"{trx:0.######} TRX";
+            UsdtBalanceText.Text = $"{usdt:0.######} USDT";
+        });
+        _sweeper.TxChanged += tx => Dispatcher.Invoke(() => TxText.Text = tx);
         LoadConfig();
     }
 
-    private sealed record Config(string Receiver, decimal MinDeposit, decimal Reserve, string ApiKey, int DerivationIndex);
+    private sealed record Config(string Receiver, decimal TriggerTrx, decimal UsdtFeeLimitTrx, string ApiKey);
 
     private void LoadConfig()
     {
@@ -34,82 +40,134 @@ public partial class MainWindow : Window
             if (!File.Exists(ConfigPath)) return;
             var cfg = JsonSerializer.Deserialize<Config>(File.ReadAllText(ConfigPath));
             if (cfg is null) return;
+
             ReceiverBox.Text = cfg.Receiver;
-            MinDepositBox.Text = cfg.MinDeposit.ToString("0.######", CultureInfo.InvariantCulture);
-            ReserveBox.Text = cfg.Reserve.ToString("0.######", CultureInfo.InvariantCulture);
+            TriggerTrxBox.Text = cfg.TriggerTrx.ToString("0.######", CultureInfo.InvariantCulture);
+            UsdtFeeLimitBox.Text = cfg.UsdtFeeLimitTrx.ToString("0.######", CultureInfo.InvariantCulture);
             ApiKeyBox.Password = cfg.ApiKey;
-            DerivationIndexBox.Text = cfg.DerivationIndex.ToString(CultureInfo.InvariantCulture);
         }
-        catch (Exception ex) { LogBox.AppendText($"Ошибка загрузки настроек: {ex.Message}\n"); }
+        catch (Exception ex)
+        {
+            LogBox.AppendText($"Ошибка загрузки настроек: {ex.Message}\n");
+        }
     }
 
-    private bool ReadInputs(out string seed, out string receiver, out decimal minDeposit, out decimal reserve, out string apiKey, out int derivationIndex)
+    private bool ReadInputs(out string privateKey, out string receiver, out decimal triggerTrx, out decimal feeLimitTrx, out string apiKey)
     {
-        seed = SeedPhraseBox.Password.Trim();
+        privateKey = PrivateKeyBox.Password.Trim();
         receiver = ReceiverBox.Text.Trim();
         apiKey = ApiKeyBox.Password.Trim();
-        minDeposit = reserve = 0;
-        derivationIndex = 0;
+        triggerTrx = 0;
+        feeLimitTrx = 0;
 
-        var words = seed.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-        if (words.Length is not (12 or 15 or 18 or 21 or 24))
-        { MessageBox.Show("Seed-фраза должна содержать 12, 15, 18, 21 или 24 слова."); return false; }
+        if (privateKey.Length != 64 || !privateKey.All(Uri.IsHexDigit))
+        {
+            MessageBox.Show("Приватный ключ должен содержать 64 hex-символа.");
+            return false;
+        }
         if (!TronAddress.IsValidBase58(receiver))
-        { MessageBox.Show("Адрес получателя TRON указан неверно."); return false; }
-        if (!int.TryParse(DerivationIndexBox.Text.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out derivationIndex) || derivationIndex < 0)
-        { MessageBox.Show("Derivation index должен быть целым числом 0 или больше."); return false; }
-        if (!TryParseTrx(MinDepositBox.Text, out minDeposit) || minDeposit < 0)
-        { MessageBox.Show("Неверный минимальный депозит."); return false; }
-        if (!TryParseTrx(ReserveBox.Text, out reserve) || reserve < 0)
-        { MessageBox.Show("Неверный резерв TRX."); return false; }
+        {
+            MessageBox.Show("Адрес получателя TRON указан неверно.");
+            return false;
+        }
+        if (!TryParseTrx(TriggerTrxBox.Text, out triggerTrx) || triggerTrx < 0)
+        {
+            MessageBox.Show("Неверный порог TRX.");
+            return false;
+        }
+        if (!TryParseTrx(UsdtFeeLimitBox.Text, out feeLimitTrx) || feeLimitTrx <= 0)
+        {
+            MessageBox.Show("Неверный лимит комиссии USDT.");
+            return false;
+        }
         return true;
     }
 
-    private static bool TryParseTrx(string text, out decimal value) => decimal.TryParse(text.Replace(',', '.'), NumberStyles.Number, CultureInfo.InvariantCulture, out value);
+    private static bool TryParseTrx(string text, out decimal value) => decimal.TryParse(
+        text.Replace(',', '.'), NumberStyles.Number, CultureInfo.InvariantCulture, out value);
 
     private void Save_Click(object sender, RoutedEventArgs e)
     {
-        if (!ReadInputs(out var seed, out var receiver, out var minDeposit, out var reserve, out var apiKey, out var derivationIndex)) return;
+        if (!ReadInputs(out var privateKey, out var receiver, out var triggerTrx, out var feeLimitTrx, out var apiKey))
+            return;
+
         try
         {
             Directory.CreateDirectory(_appDir);
-            var protectedBytes = ProtectedData.Protect(Encoding.UTF8.GetBytes(seed), null, DataProtectionScope.CurrentUser);
-            File.WriteAllBytes(SeedPath, protectedBytes);
-            var config = new Config(receiver, minDeposit, reserve, apiKey, derivationIndex);
+            var protectedBytes = ProtectedData.Protect(
+                Encoding.UTF8.GetBytes(privateKey), null, DataProtectionScope.CurrentUser);
+            File.WriteAllBytes(KeyPath, protectedBytes);
+
+            var config = new Config(receiver, triggerTrx, feeLimitTrx, apiKey);
             File.WriteAllText(ConfigPath, JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
-            SeedPhraseBox.Clear();
-            MessageBox.Show("Настройки сохранены. Seed-фраза зашифрована средствами Windows.");
+            PrivateKeyBox.Clear();
+            MessageBox.Show("Настройки сохранены. Приватный ключ зашифрован средствами Windows.");
         }
-        catch (Exception ex) { LogBox.AppendText($"Ошибка сохранения: {ex.Message}\n"); MessageBox.Show(ex.Message); }
+        catch (Exception ex)
+        {
+            LogBox.AppendText($"Ошибка сохранения: {ex.Message}\n");
+            MessageBox.Show(ex.Message);
+        }
     }
 
     private async void Start_Click(object sender, RoutedEventArgs e)
     {
         try
         {
-            string seed;
-            if (!string.IsNullOrWhiteSpace(SeedPhraseBox.Password)) seed = SeedPhraseBox.Password.Trim();
-            else if (File.Exists(SeedPath)) seed = Encoding.UTF8.GetString(ProtectedData.Unprotect(File.ReadAllBytes(SeedPath), null, DataProtectionScope.CurrentUser));
-            else { MessageBox.Show("Сначала введите seed-фразу и нажмите Сохранить."); return; }
+            string privateKey;
+            if (!string.IsNullOrWhiteSpace(PrivateKeyBox.Password))
+                privateKey = PrivateKeyBox.Password.Trim();
+            else if (File.Exists(KeyPath))
+                privateKey = Encoding.UTF8.GetString(ProtectedData.Unprotect(File.ReadAllBytes(KeyPath), null, DataProtectionScope.CurrentUser));
+            else
+            {
+                MessageBox.Show("Сначала введите приватный ключ и нажмите Сохранить.");
+                return;
+            }
 
-            if (!ReadStoredInputs(out var receiver, out var minDeposit, out var reserve, out var apiKey, out var derivationIndex)) return;
-            await _sweeper.ConfigureAsync(seed, receiver, minDeposit, reserve, apiKey, _appDir, derivationIndex);
-            AddressText.Text = _sweeper.SourceAddress;
+            if (!ReadInputsFromStored(out var receiver, out var triggerTrx, out var feeLimitTrx, out var apiKey)) return;
+
+            await _sweeper.ConfigureAsync(privateKey, receiver, triggerTrx, feeLimitTrx, apiKey);
+            AddressText.Text = "проверяется...";
             await _sweeper.StartAsync();
         }
-        catch (Exception ex) { LogBox.AppendText($"Ошибка запуска: {ex.Message}\n"); MessageBox.Show(ex.Message); }
+        catch (Exception ex)
+        {
+            LogBox.AppendText($"Ошибка запуска: {ex.Message}\n");
+            MessageBox.Show(ex.Message);
+        }
     }
 
-    private bool ReadStoredInputs(out string receiver, out decimal minDeposit, out decimal reserve, out string apiKey, out int derivationIndex)
+    private bool ReadInputsFromStored(out string receiver, out decimal triggerTrx, out decimal feeLimitTrx, out string apiKey)
     {
-        receiver = ReceiverBox.Text.Trim(); apiKey = ApiKeyBox.Password.Trim(); minDeposit = reserve = 0; derivationIndex = 0;
-        if (!TronAddress.IsValidBase58(receiver)) { MessageBox.Show("Адрес получателя TRON указан неверно."); return false; }
-        if (!int.TryParse(DerivationIndexBox.Text.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out derivationIndex) || derivationIndex < 0) { MessageBox.Show("Неверный derivation index."); return false; }
-        if (!TryParseTrx(MinDepositBox.Text, out minDeposit) || minDeposit < 0) { MessageBox.Show("Неверный минимальный депозит."); return false; }
-        if (!TryParseTrx(ReserveBox.Text, out reserve) || reserve < 0) { MessageBox.Show("Неверный резерв TRX."); return false; }
+        receiver = ReceiverBox.Text.Trim();
+        apiKey = ApiKeyBox.Password.Trim();
+        triggerTrx = 0;
+        feeLimitTrx = 0;
+
+        if (!TronAddress.IsValidBase58(receiver))
+        {
+            MessageBox.Show("Адрес получателя TRON указан неверно.");
+            return false;
+        }
+        if (!TryParseTrx(TriggerTrxBox.Text, out triggerTrx) || triggerTrx < 0)
+        {
+            MessageBox.Show("Неверный порог TRX.");
+            return false;
+        }
+        if (!TryParseTrx(UsdtFeeLimitBox.Text, out feeLimitTrx) || feeLimitTrx <= 0)
+        {
+            MessageBox.Show("Неверный лимит комиссии USDT.");
+            return false;
+        }
         return true;
     }
 
     private void Stop_Click(object sender, RoutedEventArgs e) => _sweeper.Stop();
-    protected override void OnClosed(EventArgs e) { _sweeper.Stop(); base.OnClosed(e); }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        _sweeper.Stop();
+        base.OnClosed(e);
+    }
 }
