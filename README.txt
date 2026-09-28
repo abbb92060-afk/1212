@@ -16,3 +16,5 @@ IMPORTANT:
 - This project has not been fully built or audited in this environment.
 - Test with a dedicated test wallet and small amounts before any real funds.
 - Never put a seed phrase/private key into GitHub or send it in chat.
+
+Additional fix: IContractClientFactory is declared in the Tron.Contracts namespace, so Sweeper.cs imports Tron.Contracts.

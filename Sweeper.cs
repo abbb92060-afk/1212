@@ -5,6 +5,7 @@ using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Tron;
+using Tron.Contracts;
 
 namespace TronAutoSweeper;
 
@@ -194,7 +195,7 @@ public sealed class Sweeper
         if (_contractClientFactory is null)
             throw new InvalidOperationException("TRC-20 client не инициализирован.");
 
-        // TronNet 0.2.0 expects the human-readable token amount here and applies token decimals.
+        // TronNet.Wallet 1.0.1 TRC20 client accepts the human-readable token amount (decimal).
         Log?.Invoke($"USDT найдено: {usdtAmount:0.######}. Отправляю весь баланс → {_receiver}");
         var contractClient = _contractClientFactory.CreateClient(ContractProtocol.TRC20);
         var account = _walletClient!.GetAccount(_privateKey);
