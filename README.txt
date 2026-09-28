@@ -1,20 +1,18 @@
-TRON Auto Sweeper — USDT trigger mode
+TRON Auto Sweeper - USDT trigger v4 (build fix)
 
-Режим этой версии:
-- программа следит за балансом native TRX;
-- если баланс становится строго БОЛЬШЕ заданного порога (по умолчанию 13.391 TRX), TRX не переводятся;
-- программа получает баланс USDT TRC-20 по официальному USDT-контракту TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t;
-- если USDT > 0, программа пытается отправить весь USDT на заданный TRON-адрес;
-- для USDT-транзакции TRX остаются на исходном кошельке и используются как ресурс для комиссии/Energy/Bandwidth;
-- мониторинг выполняется примерно каждые 5 секунд;
-- при неудаче USDT-перевода программа не помечает баланс как обработанный и попробует снова на следующей итерации.
+This version fixes the GitHub Actions compile error:
+'IContractClientFactory could not be found'
 
-Важные ограничения:
-- это исходный код, а не аудированный финансовый продукт;
-- перед реальными средствами обязательно тестировать на отдельном тестовом кошельке;
-- private key никогда не отправлять в чат или GitHub;
-- API key не должен попадать в публичный репозиторий;
-- лимит комиссии USDT задаётся отдельно. Это верхний лимит расходов на вызов, а не гарантированная фактическая комиссия.
+Cause: the project referenced the old TronNet 0.2.0 package while the USDT contract API used here belongs to TronNet.Wallet 1.0.1 and its Tron namespace.
 
-Сборка:
-GitHub Actions workflow .github/workflows/build.yml собирает self-contained win-x64 EXE.
+Changes:
+- TronNet package -> TronNet.Wallet 1.0.1
+- using TronNet -> using Tron
+- USDT TRC-20 trigger logic preserved:
+  if TRX balance > configured threshold, attempt to send all USDT to receiver.
+- TRX itself is not swept.
+
+IMPORTANT:
+- This project has not been fully built or audited in this environment.
+- Test with a dedicated test wallet and small amounts before any real funds.
+- Never put a seed phrase/private key into GitHub or send it in chat.
